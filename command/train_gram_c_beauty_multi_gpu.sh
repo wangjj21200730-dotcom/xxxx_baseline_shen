@@ -44,7 +44,7 @@ BACKBONE="${LOCAL_MODEL_DIR}/t5_small"
 # GRAM-C 协同前缀配置
 USE_COLLABORATIVE_PREFIX=1      # 启用协同前缀
 GCN_DIM=64                      # GCN embedding 维度
-PREFIX_INIT_SCALE=0.1           # 前缀初始缩放因子
+PREFIX_INIT_SCALE=0.01          # 前缀初始缩放因子（降低初始幅度，减小早期噪声）
 PREFIX_DROPOUT_PROB=0.2         # 前缀 dropout 概率
 ADAPTER_DROPOUT=0.1             # Adapter dropout 概率
 RECENT_K=5                      # 使用最近 K 个物品
