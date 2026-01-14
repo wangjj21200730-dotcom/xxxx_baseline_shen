@@ -210,11 +210,8 @@ class DistributedRunnerGRAM:
                             return_dict=False,
                         )[0]
 
-                        # Normalize loss by world size and gradient accumulation steps
-                        loss = loss / (
-                            dist.get_world_size()
-                            * self.args.gradient_accumulation_steps
-                        )
+                        # Normalize loss only by gradient accumulation steps (DDP already handles world-size syncing)
+                        loss = loss / self.args.gradient_accumulation_steps
 
                         loss.backward()
 
@@ -231,11 +228,6 @@ class DistributedRunnerGRAM:
                         ) % self.args.gradient_accumulation_steps == 0 or step + 1 == len(
                             self.train_loader_rec
                         ):
-                            # All-reduce the accumulated gradients
-                            for param in self.model_rec.parameters():
-                                if param.grad is not None:
-                                    dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
-
                             # Clip gradients
                             torch.nn.utils.clip_grad_norm_(
                                 self.model_rec.parameters(), self.args.clip

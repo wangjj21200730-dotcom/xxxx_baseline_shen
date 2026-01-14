@@ -2,6 +2,17 @@ import numpy as np
 import math
 
 
+def _normalize_text(text: str) -> str:
+    """
+    Normalize decoded text for fair matching.
+    - strip leading/trailing whitespace
+    - lowercase
+    """
+    if not isinstance(text, str):
+        text = str(text)
+    return text.strip().lower()
+
+
 def rel_results(predictions, targets, scores, k):
     results = []
     batch_length = len(targets)
@@ -11,9 +22,10 @@ def rel_results(predictions, targets, scores, k):
         pairs = [(a, b) for a, b in zip(one_batch_sequence, one_batch_score)]
         sorted_pairs = sorted(pairs, key=lambda x: x[1], reverse=True)
         gt = targets[b]
+        norm_gt = _normalize_text(gt)
         one_results = []
         for sorted_pred in sorted_pairs:
-            if sorted_pred[0] == gt:
+            if _normalize_text(sorted_pred[0]) == norm_gt:
                 one_results.append(1)
             else:
                 one_results.append(0)

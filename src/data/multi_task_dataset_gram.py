@@ -154,6 +154,14 @@ class MultiTaskDatasetGRAM(Dataset):
             if self.rank == 0:
                 logging.info(f"Loaded item_id to GCN index mapping from {mapping_path}")
                 logging.info(f"  - Number of items in mapping: {len(self.item_id_to_gcn_index)}")
+
+                # Sanity check: key format should be raw ASIN like "B00005N7P0"
+                sample_key = next(iter(self.item_id_to_gcn_index.keys()), "")
+                if any(token in sample_key for token in ["title:", "brand:", "description:"]) or " " in sample_key:
+                    logging.warning(
+                        "Mapping key example looks like long text (includes spaces/title/brand/etc.). "
+                        "Expected raw item id (e.g., ASIN). Collaborative prefix may silently fall back to 0."
+                    )
         else:
             if self.rank == 0:
                 logging.warning(
