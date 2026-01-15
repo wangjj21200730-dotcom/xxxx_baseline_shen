@@ -104,6 +104,22 @@ class GRAM_C(GRAM):
             use_collaborative_prefix=self.use_collaborative_prefix,
             prefix_dropout_prob=self.prefix_dropout_prob,
         )
+
+    def wrap_encoder(self, use_checkpoint=False):
+        # During GRAM.__init__, wrap_encoder() is called before GRAM_C finishes
+        # initializing collaborative modules. Fall back to the parent wrapper
+        # in that early stage, and use EncoderWrapperC afterwards.
+        if not hasattr(self, "collaborative_adapter") or not hasattr(
+            self, "gcn_item_embedding"
+        ):
+            return GRAM.wrap_encoder(self, use_checkpoint=use_checkpoint)
+        return self.wrap_encoder_c(use_checkpoint=use_checkpoint)
+
+    def load_t5(self, state_dict):
+        # Use parent loading logic, then re-wrap encoder with EncoderWrapperC.
+        super().load_t5(state_dict)
+        if self.use_collaborative_prefix:
+            self.wrap_encoder_c()
     
     def load_gcn_embeddings(self, gcn_emb_path: str):
         """
@@ -407,82 +423,71 @@ class EncoderWrapperC(EncoderWrapper):
             attention_mask_reshaped = attention_mask.view(bsz * self.n_passages, passage_length)
         
         # Step 4: Pre-Encoder Prefix Injection
-        # 如果有 prefix，需要在 embedding 层拼接
+        # Fix: keep FiD-style independent passage encoding to avoid OOM.
         if prefix_emb is not None:
-            # prefix_emb: [Batch, 1, D]
-            # 需要扩展到每个 passage: [Batch * N_passages, 1, D]
-            # 但实际上 prefix 应该只在整个序列的最前面出现一次
-            # 所以我们需要特殊处理：只在第一个 passage 前加 prefix
-            
-            # 方案：将所有 passages 的 embedding 合并后再加 prefix
-            # 先恢复到 [Batch, N_passages, Passage_Length, D]
-            inputs_embeds_4d = inputs_embeds_reshaped.view(bsz, self.n_passages, passage_length, -1)
-            attention_mask_4d = attention_mask_reshaped.view(bsz, self.n_passages, passage_length)
-            
-            # 合并为 [Batch, N_passages * Passage_Length, D]
-            inputs_embeds_merged = inputs_embeds_4d.view(bsz, self.n_passages * passage_length, -1)
-            attention_mask_merged = attention_mask_4d.view(bsz, self.n_passages * passage_length)
-            
-            # 在最前面拼接 prefix: [Batch, 1 + N*L, D]
-            inputs_embeds_with_prefix = torch.cat([prefix_emb, inputs_embeds_merged], dim=1)
-            
-            # 扩展 attention_mask: [Batch, 1 + N*L]
-            prefix_mask = torch.ones((bsz, 1), dtype=attention_mask_merged.dtype, device=device)
-            attention_mask_with_prefix = torch.cat([prefix_mask, attention_mask_merged], dim=1)
+            # prefix_emb: [B, 1, D] -> [B*N, 1, D]
+            prefix_emb_expanded = prefix_emb.repeat_interleave(self.n_passages, dim=0)
 
-            self._last_encoder_attention_mask = attention_mask_with_prefix
-            
-            # Step 5: 送入 encoder（使用 inputs_embeds 而不是 input_ids）
-            # 注意：这里不能再用 passage 分割了，因为加了 prefix 后长度变了
+            inputs_embeds_with_prefix = torch.cat(
+                [prefix_emb_expanded, inputs_embeds_reshaped], dim=1
+            )  # [B*N, 1+L, D]
+
+            prefix_mask = torch.ones(
+                (bsz * self.n_passages, 1),
+                dtype=attention_mask_reshaped.dtype,
+                device=device,
+            )
+            attention_mask_with_prefix = torch.cat(
+                [prefix_mask, attention_mask_reshaped], dim=1
+            )  # [B*N, 1+L]
+
+            self._last_encoder_attention_mask = attention_mask_with_prefix.view(
+                bsz, self.n_passages * (passage_length + 1)
+            )
+
             outputs = self.encoder(
                 inputs_embeds=inputs_embeds_with_prefix,
                 attention_mask=attention_mask_with_prefix,
-                **kwargs
+                **kwargs,
             )
-            
-            last_hidden_states = outputs[0]  # [Batch, 1 + N*L, D]
-            
-            # Step 6: 应用 position embedding（需要特殊处理）
-            # position embedding 应该只应用于原始 token，不应用于 prefix
+            last_hidden_states = outputs[0]  # [B*N, 1+L, D]
+
             if self.position_embedding is not None:
-                # 分离 prefix 和原始 hidden states
-                prefix_hidden = last_hidden_states[:, :1, :]  # [Batch, 1, D]
-                text_hidden = last_hidden_states[:, 1:, :]    # [Batch, N*L, D]
-                
-                # 重塑 text_hidden 以应用 position embedding
-                text_hidden_4d = text_hidden.view(bsz, self.n_passages, passage_length, -1)
-                
-                # 计算 position embeddings
-                position_ids = torch.arange(self.n_passages, device=device).expand(bsz, self.n_passages)
-                position_embeddings = self.position_embedding(position_ids)  # [Batch, N_passages, D]
-                position_embeddings = position_embeddings.unsqueeze(2)  # [Batch, N_passages, 1, D]
-                
-                # 应用 position embedding
-                text_hidden_4d = text_hidden_4d + position_embeddings
-                text_hidden = text_hidden_4d.view(bsz, self.n_passages * passage_length, -1)
-                
-                # 重新拼接 prefix
-                last_hidden_states = torch.cat([prefix_hidden, text_hidden], dim=1)
-            
+                position_ids = torch.arange(self.n_passages, device=device).expand(
+                    bsz, self.n_passages
+                )
+                position_embeddings = self.position_embedding(position_ids)
+                position_embeddings = position_embeddings.view(
+                    bsz * self.n_passages, 1, -1
+                )
+                last_hidden_states = last_hidden_states + position_embeddings
+
+            last_hidden_states = last_hidden_states.view(
+                bsz, self.n_passages * (passage_length + 1), -1
+            )
+
         else:
-            # 没有 prefix，使用原始逻辑
             outputs = self.encoder(
                 inputs_embeds=inputs_embeds_reshaped,
                 attention_mask=attention_mask_reshaped,
-                **kwargs
+                **kwargs,
             )
-            
+
             last_hidden_states = outputs[0]
-            
-            # 应用 position embedding
+
             if self.position_embedding is not None:
-                position_ids = torch.arange(self.n_passages, device=device).expand(bsz, self.n_passages)
+                position_ids = torch.arange(self.n_passages, device=device).expand(
+                    bsz, self.n_passages
+                )
                 position_embeddings = self.position_embedding(position_ids)
-                position_embeddings = position_embeddings.view(bsz * self.n_passages, 1, -1)
+                position_embeddings = position_embeddings.view(
+                    bsz * self.n_passages, 1, -1
+                )
                 last_hidden_states = last_hidden_states + position_embeddings
-            
-            # 重塑为 [Batch, N*L, D]
-            last_hidden_states = last_hidden_states.view(bsz, self.n_passages * passage_length, -1)
+
+            last_hidden_states = last_hidden_states.view(
+                bsz, self.n_passages * passage_length, -1
+            )
 
             self._last_encoder_attention_mask = attention_mask_reshaped.view(
                 bsz, self.n_passages * passage_length

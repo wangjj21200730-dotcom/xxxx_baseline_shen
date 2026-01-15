@@ -149,6 +149,14 @@ def distributed_main(local_rank, args):
     
     model_rec = create_model(model_type, config=config)
     model_rec.load_t5(model_backbone.state_dict())
+
+    if local_rank == 0 and use_collaborative_prefix:
+        logging.info(
+            f"[GRAM-C DIAG] encoder wrapper type after load_t5: {type(model_rec.encoder)}"
+        )
+        logging.info(
+            f"[GRAM-C DIAG] encoder has set_recent_item_ids: {hasattr(model_rec.encoder, 'set_recent_item_ids')}"
+        )
     
     # 如果使用 GRAM-C，加载 GCN embeddings
     if use_collaborative_prefix and hasattr(model_rec, 'load_gcn_embeddings'):

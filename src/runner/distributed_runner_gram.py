@@ -217,6 +217,29 @@ class DistributedRunnerGRAM:
                         if "recent_item_ids" in batch:
                             recent_item_ids = batch["recent_item_ids"].to(self.device)
 
+                        if (
+                            self.rank == 0
+                            and alter == 0
+                            and rec_epoch == 0
+                            and step == 0
+                            and self.args.use_collaborative_prefix
+                        ):
+                            if recent_item_ids is None:
+                                logging.info(
+                                    "[GRAM-C DIAG] recent_item_ids is None (not present in batch)"
+                                )
+                            else:
+                                with torch.no_grad():
+                                    nonzero_ratio = (
+                                        (recent_item_ids != 0).float().mean().item()
+                                    )
+                                    min_id = int(recent_item_ids.min().item())
+                                    max_id = int(recent_item_ids.max().item())
+                                logging.info(
+                                    f"[GRAM-C DIAG] recent_item_ids shape={tuple(recent_item_ids.shape)} "
+                                    f"nonzero_ratio={nonzero_ratio:.4f} min={min_id} max={max_id}"
+                                )
+
                         forward_kwargs = dict(
                             input_ids=input_ids,
                             attention_mask=attention_mask,
