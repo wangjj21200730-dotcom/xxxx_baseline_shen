@@ -13,8 +13,8 @@ REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 # =============================
 export CUDA_VISIBLE_DEVICES=2,3,4,5
 DISTRIBUTED=1
-GPU_LIST="2,3,4,5"
-MASTER_PORT=12345
+GPU_LIST="0,1,2,3"
+MASTER_PORT=2341
 
 # =============================
 # Dataset & paths
@@ -41,16 +41,18 @@ GCN_DIM=64
 # Training hyperparameters
 # =============================
 BATCH_SIZE=32
-EVAL_BATCH_SIZE=16
+EVAL_BATCH_SIZE=1
 REC_EPOCHS=30
-REC_LR=1e-4
-WARMUP_PROP=0.1
+REC_LR=1e-3
+WARMUP_PROP=0.05
 GRADIENT_ACCUMULATION_STEPS=2
 MAX_HIS=20
 ITEM_PROMPT_MAX_LEN=128
 TARGET_MAX_LEN=32
-BEAM_SIZE=10
+BEAM_SIZE=50
 HIERARCHICAL_ID_TYPE="hierarchy_v1_c128_l7_len32768_split"
+METRICS="hit@1,hit@3,hit@5,hit@10,hit@20,hit@50,ndcg@1,ndcg@3,ndcg@5,ndcg@10,ndcg@20,ndcg@50"
+SAVE_PREDICTIONS=1
 
 # =============================
 # Output
@@ -92,9 +94,10 @@ python "${REPO_ROOT}/src/main_generative_gram.py" \
     --prefix_dropout_prob ${PREFIX_DROPOUT_PROB} \
     --adapter_dropout ${ADAPTER_DROPOUT} \
     --recent_k ${RECENT_K} \
-    --metrics "hit@5,hit@10,ndcg@5,ndcg@10" \
+    --metrics ${METRICS} \
     --test_epoch_rec 5 \
     --save_rec_epochs 5 \
+    --save_predictions ${SAVE_PREDICTIONS} \
     --item_id_type "split" \
     --hierarchical_id_type "${HIERARCHICAL_ID_TYPE}" \
     --prompt_file "${REPO_ROOT}/prompt.txt" \
