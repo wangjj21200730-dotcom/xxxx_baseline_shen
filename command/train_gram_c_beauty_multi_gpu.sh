@@ -24,10 +24,10 @@ export CUDA_VISIBLE_DEVICES=2,3,4,5
 DISTRIBUTED=1
 
 # 3. 指定 GPU 列表（必须与 CUDA_VISIBLE_DEVICES 一致）
-GPU_LIST="2,3,4,5"
+GPU_LIST="0,1,2,3"
 
 # 4. 设置分布式训练端口（避免冲突）
-MASTER_PORT=12345
+MASTER_PORT=2341
 # ============================================================
 
 # 数据集配置
@@ -59,20 +59,24 @@ CF_MODEL="sasrec"               # 协同过滤模型（sasrec/lightgcn）
 
 # 训练配置（多卡可以增大 batch size）
 BATCH_SIZE=32                   # 多卡训练可以用更大的 batch size
-EVAL_BATCH_SIZE=16
+EVAL_BATCH_SIZE=1
 REC_EPOCHS=30                   # 训练 30 个 epoch
-REC_LR=1e-4
-WARMUP_PROP=0.1
+REC_LR=1e-3
+WARMUP_PROP=0.05
 GRADIENT_ACCUMULATION_STEPS=2
 
 # 其他配置
 MAX_HIS=20
 ITEM_PROMPT_MAX_LEN=128
 TARGET_MAX_LEN=32
-BEAM_SIZE=10
+BEAM_SIZE=50
 
 # hierarchical id 文件后缀（对应: rec_datasets/Beauty/item_generative_indexing_${HIERARCHICAL_ID_TYPE}.txt）
 HIERARCHICAL_ID_TYPE="hierarchy_v1_c128_l7_len32768_split"
+
+# Evaluation metrics / outputs
+METRICS="hit@1,hit@3,hit@5,hit@10,hit@20,hit@50,ndcg@1,ndcg@3,ndcg@5,ndcg@10,ndcg@20,ndcg@50"
+SAVE_PREDICTIONS=1
 
 # 输出路径
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -113,9 +117,10 @@ python "${REPO_ROOT}/src/main_generative_gram.py" \
     --prefix_dropout_prob ${PREFIX_DROPOUT_PROB} \
     --adapter_dropout ${ADAPTER_DROPOUT} \
     --recent_k ${RECENT_K} \
-    --metrics "hit@5,hit@10,ndcg@5,ndcg@10" \
+    --metrics ${METRICS} \
     --test_epoch_rec 5 \
     --save_rec_epochs 5 \
+    --save_predictions ${SAVE_PREDICTIONS} \
     --item_id_type "split" \
     --hierarchical_id_type "${HIERARCHICAL_ID_TYPE}" \
     --prompt_file "${REPO_ROOT}/prompt.txt" \
