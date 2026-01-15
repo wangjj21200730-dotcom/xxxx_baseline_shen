@@ -188,16 +188,19 @@ class SingleRunnerGRAM:
                         
                         # GRAM-C: 提取 recent_item_ids（如果存在）
                         recent_item_ids = None
-                        if "recent_item_ids" in batch:
+                        if self.args.use_collaborative_prefix and "recent_item_ids" in batch:
                             recent_item_ids = batch["recent_item_ids"].to(self.device)
 
-                        loss = self.model_rec(
+                        forward_kwargs = dict(
                             input_ids=input_ids,
                             attention_mask=attention_mask,
                             labels=output_ids,
-                            recent_item_ids=recent_item_ids,
                             return_dict=False,
-                        )[0]
+                        )
+                        if self.args.use_collaborative_prefix and recent_item_ids is not None:
+                            forward_kwargs["recent_item_ids"] = recent_item_ids
+
+                        loss = self.model_rec(**forward_kwargs)[0]
 
                         loss = loss / self.args.gradient_accumulation_steps
 
@@ -488,7 +491,7 @@ class SingleRunnerGRAM:
                 
                 # GRAM-C: 提取 recent_item_ids（如果存在）
                 recent_item_ids = None
-                if "recent_item_ids" in batch:
+                if self.args.use_collaborative_prefix and "recent_item_ids" in batch:
                     recent_item_ids = batch["recent_item_ids"].to(self.device)
 
                 if self.args.item_id_type == "t5_token":
@@ -502,7 +505,7 @@ class SingleRunnerGRAM:
                 else:
                     max_length = 50
 
-                prediction = self.model_rec.generate(
+                generate_kwargs = dict(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     max_length=max_length,
@@ -512,8 +515,11 @@ class SingleRunnerGRAM:
                     output_scores=True,
                     return_dict_in_generate=True,
                     length_penalty=self.length_penalty,
-                    recent_item_ids=recent_item_ids,
                 )
+                if self.args.use_collaborative_prefix and recent_item_ids is not None:
+                    generate_kwargs["recent_item_ids"] = recent_item_ids
+
+                prediction = self.model_rec.generate(**generate_kwargs)
 
                 prediction_ids = prediction["sequences"]
                 prediction_scores = prediction["sequences_scores"]
