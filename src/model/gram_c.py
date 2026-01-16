@@ -28,6 +28,7 @@ class GRAM_C(GRAM):
         - gcn_item_embedding: nn.Embedding, 预训练的 Item GCN 向量（冻结）
         - collaborative_adapter: CollaborativeAdapter
         - use_collaborative_prefix: bool
+        - use_sequential_prefix: bool (新增：是否使用序列化前缀)
         - prefix_dropout_prob: float
         - recent_k: int
     """
@@ -38,6 +39,7 @@ class GRAM_C(GRAM):
         
         # GRAM-C 配置
         self.use_collaborative_prefix = getattr(config, 'use_collaborative_prefix', True)
+        self.use_sequential_prefix = getattr(config, 'use_sequential_prefix', False)  # 新增
         self.prefix_dropout_prob = getattr(config, 'prefix_dropout_prob', 0.2)
         self.recent_k = getattr(config, 'recent_k', 5)
         self.gcn_dim = getattr(config, 'gcn_dim', 64)
@@ -66,6 +68,11 @@ class GRAM_C(GRAM):
             logging.info(f"  - GCN dim: {self.gcn_dim}")
             logging.info(f"  - LLM dim: {config.d_model}")
             logging.info(f"  - Recent K: {self.recent_k}")
+            logging.info(f"  - Sequential prefix: {self.use_sequential_prefix}")
+            if self.use_sequential_prefix:
+                logging.info(f"    -> Using {self.recent_k} sequential tokens (no pooling)")
+            else:
+                logging.info(f"    -> Using mean pooling (single token)")
             logging.info(f"  - Prefix init scale: {self.prefix_init_scale}")
             logging.info(f"  - Prefix dropout prob: {self.prefix_dropout_prob}")
         else:
@@ -102,6 +109,7 @@ class GRAM_C(GRAM):
             collaborative_adapter=self.collaborative_adapter,
             gcn_item_embedding=self.gcn_item_embedding,
             use_collaborative_prefix=self.use_collaborative_prefix,
+            use_sequential_prefix=self.use_sequential_prefix,  # 新增
             prefix_dropout_prob=self.prefix_dropout_prob,
         )
 
@@ -311,7 +319,8 @@ class EncoderWrapperC(EncoderWrapper):
     
     正确的流程：
     1. 获取 input embedding: inputs_embeds = embed_tokens(input_ids)
-    2. 构建 collaborative prefix: prefix_emb = adapter(gcn_pooled)  [B, 1, D]
+    2. 构建 collaborative prefix: prefix_emb = adapter(gcn_pooled)  [B, P, D]
+       - P=1 (均值池化模式) 或 P=K (序列化模式)
     3. 在 embedding 层拼接: inputs_embeds = cat([prefix_emb, inputs_embeds], dim=1)
     4. 扩展 attention_mask: attention_mask = cat([prefix_mask, attention_mask], dim=1)
     5. 送入 encoder: encoder(inputs_embeds=..., attention_mask=...)
@@ -328,6 +337,7 @@ class EncoderWrapperC(EncoderWrapper):
         collaborative_adapter=None,
         gcn_item_embedding=None,
         use_collaborative_prefix=True,
+        use_sequential_prefix=False,  # 新增：是否使用序列化前缀
         prefix_dropout_prob=0.2,
     ):
         super().__init__(encoder, config, use_checkpoint, position_embedding)
@@ -335,6 +345,7 @@ class EncoderWrapperC(EncoderWrapper):
         self.collaborative_adapter = collaborative_adapter
         self.gcn_item_embedding = gcn_item_embedding
         self.use_collaborative_prefix = use_collaborative_prefix
+        self.use_sequential_prefix = use_sequential_prefix  # 新增
         self.prefix_dropout_prob = prefix_dropout_prob
         
         # 用于存储当前 batch 的 recent_item_ids
@@ -357,7 +368,10 @@ class EncoderWrapperC(EncoderWrapper):
             device: 目标设备
             
         Returns:
-            [Batch, 1, LLM_Dim] 协同前缀 embedding
+            如果 use_sequential_prefix=False:
+                [Batch, 1, LLM_Dim] 均值池化后的单 token
+            如果 use_sequential_prefix=True:
+                [Batch, K, LLM_Dim] K 个独立的 soft tokens
         """
         if recent_item_ids is None or self.gcn_item_embedding is None:
             return None
@@ -366,24 +380,41 @@ class EncoderWrapperC(EncoderWrapper):
         recent_item_ids = recent_item_ids.to(device)
         gcn_embs = self.gcn_item_embedding(recent_item_ids)
         
-        # Mean pooling: [Batch, GCN_Dim]
-        # 注意：索引为 0 的是 padding，不应该参与 pooling
-        mask = (recent_item_ids != 0).float().unsqueeze(-1)  # [Batch, K, 1]
-        valid_counts = mask.sum(dim=1).clamp(min=1)  # [Batch, 1]
-        pooled_emb = (gcn_embs * mask).sum(dim=1) / valid_counts  # [Batch, GCN_Dim]
+        if self.use_sequential_prefix:
+            # 序列化模式：每个 token 独立通过 adapter
+            # gcn_embs: [Batch, K, GCN_Dim]
+            # CollaborativeAdapter 支持 3D 输入，对最后一维进行变换
+            prefix_emb = self.collaborative_adapter(gcn_embs)
+            # prefix_emb: [Batch, K, LLM_Dim]
+            
+            # 整段 Prefix Dropout（K 个 tokens 一起置零）
+            if self.training and self.prefix_dropout_prob > 0:
+                # 生成 [Batch, 1, 1] 的 dropout mask，广播到所有 K 个 tokens
+                dropout_mask = (
+                    torch.rand(prefix_emb.shape[0], 1, 1, device=device) > self.prefix_dropout_prob
+                ).float()
+                prefix_emb = prefix_emb * dropout_mask
+        else:
+            # 原有模式：均值池化
+            # 注意：索引为 0 的是 padding，不应该参与 pooling
+            mask = (recent_item_ids != 0).float().unsqueeze(-1)  # [Batch, K, 1]
+            valid_counts = mask.sum(dim=1).clamp(min=1)  # [Batch, 1]
+            pooled_emb = (gcn_embs * mask).sum(dim=1) / valid_counts  # [Batch, GCN_Dim]
+            
+            # 通过 Adapter 映射到 LLM 空间: [Batch, LLM_Dim]
+            prefix_emb = self.collaborative_adapter(pooled_emb)
+            
+            # Prefix Dropout (仅在训练时)
+            if self.training and self.prefix_dropout_prob > 0:
+                dropout_mask = (
+                    torch.rand(prefix_emb.shape[0], 1, device=device) > self.prefix_dropout_prob
+                ).float()
+                prefix_emb = prefix_emb * dropout_mask
+            
+            # 添加序列维度: [Batch, 1, LLM_Dim]
+            prefix_emb = prefix_emb.unsqueeze(1)
         
-        # 通过 Adapter 映射到 LLM 空间: [Batch, LLM_Dim]
-        prefix_emb = self.collaborative_adapter(pooled_emb)
-        
-        # Prefix Dropout (仅在训练时)
-        if self.training and self.prefix_dropout_prob > 0:
-            dropout_mask = (
-                torch.rand(prefix_emb.shape[0], 1, device=device) > self.prefix_dropout_prob
-            ).float()
-            prefix_emb = prefix_emb * dropout_mask
-        
-        # 添加序列维度: [Batch, 1, LLM_Dim]
-        return prefix_emb.unsqueeze(1)
+        return prefix_emb
     
     def forward(
         self, input_ids=None, attention_mask=None, inputs_embeds=None, **kwargs
@@ -392,6 +423,10 @@ class EncoderWrapperC(EncoderWrapper):
         前向传播，支持 Pre-Encoder Prefix Injection
         
         关键：prefix 在 encoder.forward() 之前注入到 embedding 层
+        
+        支持两种模式：
+        - 均值池化模式 (use_sequential_prefix=False): prefix 形状为 [B*N, 1, D]
+        - 序列化模式 (use_sequential_prefix=True): prefix 形状为 [B*N, K, D]
         """
         device = input_ids.device if input_ids is not None else inputs_embeds.device
         
@@ -404,6 +439,7 @@ class EncoderWrapperC(EncoderWrapper):
             passage_length = total_length // self.n_passages
         
         # Step 2: 计算 collaborative prefix（在 encoder 之前！）
+        # prefix_emb: [B, P, D] 其中 P=1 (均值池化) 或 P=K (序列化)
         prefix_emb = None
         if self.use_collaborative_prefix and self._recent_item_ids is not None:
             prefix_emb = self._compute_collaborative_prefix(self._recent_item_ids, device)
@@ -425,24 +461,26 @@ class EncoderWrapperC(EncoderWrapper):
         # Step 4: Pre-Encoder Prefix Injection
         # Fix: keep FiD-style independent passage encoding to avoid OOM.
         if prefix_emb is not None:
-            # prefix_emb: [B, 1, D] -> [B*N, 1, D]
+            # prefix_emb: [B, P, D] -> [B*N, P, D]
+            # P = 1 (均值池化) 或 P = K (序列化)
+            prefix_length = prefix_emb.shape[1]
             prefix_emb_expanded = prefix_emb.repeat_interleave(self.n_passages, dim=0)
 
             inputs_embeds_with_prefix = torch.cat(
                 [prefix_emb_expanded, inputs_embeds_reshaped], dim=1
-            )  # [B*N, 1+L, D]
+            )  # [B*N, P+L, D]
 
             prefix_mask = torch.ones(
-                (bsz * self.n_passages, 1),
+                (bsz * self.n_passages, prefix_length),
                 dtype=attention_mask_reshaped.dtype,
                 device=device,
             )
             attention_mask_with_prefix = torch.cat(
                 [prefix_mask, attention_mask_reshaped], dim=1
-            )  # [B*N, 1+L]
+            )  # [B*N, P+L]
 
             self._last_encoder_attention_mask = attention_mask_with_prefix.view(
-                bsz, self.n_passages * (passage_length + 1)
+                bsz, self.n_passages * (passage_length + prefix_length)
             )
 
             outputs = self.encoder(
@@ -450,7 +488,7 @@ class EncoderWrapperC(EncoderWrapper):
                 attention_mask=attention_mask_with_prefix,
                 **kwargs,
             )
-            last_hidden_states = outputs[0]  # [B*N, 1+L, D]
+            last_hidden_states = outputs[0]  # [B*N, P+L, D]
 
             if self.position_embedding is not None:
                 position_ids = torch.arange(self.n_passages, device=device).expand(
@@ -463,7 +501,7 @@ class EncoderWrapperC(EncoderWrapper):
                 last_hidden_states = last_hidden_states + position_embeddings
 
             last_hidden_states = last_hidden_states.view(
-                bsz, self.n_passages * (passage_length + 1), -1
+                bsz, self.n_passages * (passage_length + prefix_length), -1
             )
 
         else:

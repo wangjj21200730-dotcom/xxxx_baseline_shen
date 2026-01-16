@@ -332,6 +332,12 @@ def create_parser() -> argparse.ArgumentParser:
         help="Enable collaborative context prefix injection (1=enable, 0=disable)",
     )
     parser.add_argument(
+        "--use_sequential_prefix",
+        type=int,
+        default=0,
+        help="Use sequential prefix mode (1=K independent tokens, 0=mean pooling single token)",
+    )
+    parser.add_argument(
         "--gcn_dim",
         type=int,
         default=64,
@@ -342,6 +348,12 @@ def create_parser() -> argparse.ArgumentParser:
         type=str,
         default="",
         help="Path to precomputed Item GCN embeddings (.pt or .npy file)",
+    )
+    parser.add_argument(
+        "--lightgcn_emb_path",
+        type=str,
+        default="",
+        help="Path to LightGCN item embeddings (.pt file). Takes priority over gcn_item_emb_path if specified.",
     )
     parser.add_argument(
         "--item_id_to_gcn_index_path",

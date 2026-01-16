@@ -223,7 +223,13 @@ class TestDatasetGRAM(Dataset):
             self.data["user_id"].append(datapoint["user_id"])
             
             # GRAM-C: 保存原始 item IDs（从 history 字段解析）
-            history_raw = datapoint["history"].split(self.his_sep) if datapoint["history"] else []
+            history_raw = (
+                datapoint["history"].split(self.his_sep) if datapoint["history"] else []
+            )
+            # Keep a canonical chronological order (oldest -> newest) for collaborative prefix.
+            # Note: when reverse_history=1, datapoint["history"] has already been reversed for prompt text.
+            if self.reverse_history:
+                history_raw = history_raw[::-1]
             self.data["history_raw_ids"].append(history_raw)
 
         if self.args.rank == 0 and self.args.verbose_input_output:

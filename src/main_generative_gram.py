@@ -82,6 +82,7 @@ def setup_gram_c_config(config, args):
     """
     # GRAM-C 配置
     config.use_collaborative_prefix = getattr(args, 'use_collaborative_prefix', 0)
+    config.use_sequential_prefix = getattr(args, 'use_sequential_prefix', 0)  # 新增
     config.gcn_dim = getattr(args, 'gcn_dim', 64)
     config.prefix_init_scale = getattr(args, 'prefix_init_scale', 0.1)
     config.prefix_dropout_prob = getattr(args, 'prefix_dropout_prob', 0.2)
@@ -160,14 +161,21 @@ def distributed_main(local_rank, args):
     
     # 如果使用 GRAM-C，加载 GCN embeddings
     if use_collaborative_prefix and hasattr(model_rec, 'load_gcn_embeddings'):
+        # 优先使用 lightgcn_emb_path，回退到 gcn_item_emb_path
+        lightgcn_emb_path = getattr(args, 'lightgcn_emb_path', '')
         gcn_emb_path = getattr(args, 'gcn_item_emb_path', '')
-        if gcn_emb_path and os.path.exists(gcn_emb_path):
-            model_rec.load_gcn_embeddings(gcn_emb_path)
+        
+        emb_path = lightgcn_emb_path if lightgcn_emb_path else gcn_emb_path
+        
+        if emb_path and os.path.exists(emb_path):
+            model_rec.load_gcn_embeddings(emb_path)
             if local_rank == 0:
-                logging.info(f"Loaded GCN embeddings from {gcn_emb_path}")
+                logging.info(f"Loaded GCN embeddings from {emb_path}")
+                if lightgcn_emb_path:
+                    logging.info(f"  (using LightGCN embeddings)")
         else:
             if local_rank == 0:
-                logging.warning(f"GCN embedding file not found: {gcn_emb_path}")
+                logging.warning(f"GCN embedding file not found: {emb_path}")
 
     generate_with_grad = undecorated(model_rec.generate)
     model_rec.generate_with_grad = MethodType(generate_with_grad, model_rec)
@@ -222,6 +230,20 @@ def distributed_main(local_rank, args):
         if local_rank == 0:
             logging.info(f"Train done ... Load model from {runner.cur_model_path}")
         runner.test(runner.cur_model_path)
+    else:
+        # Evaluation-only (distributed) mode: mirror single_main behavior.
+        if args.test_by_valid:
+            if local_rank == 0:
+                logging.info(
+                    f"[VALID] Test model from {args.rec_model_path}, {args.id_model_path}"
+                )
+            runner.validate(path=args.rec_model_path)
+        else:
+            if local_rank == 0:
+                logging.info(
+                    f"Test model from {args.rec_model_path}, {args.id_model_path}"
+                )
+            runner.test(path=args.rec_model_path)
     dist.barrier()
     dist.destroy_process_group()
 
@@ -270,12 +292,19 @@ def single_main(args):
     
     # 如果使用 GRAM-C，加载 GCN embeddings
     if use_collaborative_prefix and hasattr(model_rec, 'load_gcn_embeddings'):
+        # 优先使用 lightgcn_emb_path，回退到 gcn_item_emb_path
+        lightgcn_emb_path = getattr(args, 'lightgcn_emb_path', '')
         gcn_emb_path = getattr(args, 'gcn_item_emb_path', '')
-        if gcn_emb_path and os.path.exists(gcn_emb_path):
-            model_rec.load_gcn_embeddings(gcn_emb_path)
-            logging.info(f"Loaded GCN embeddings from {gcn_emb_path}")
+        
+        emb_path = lightgcn_emb_path if lightgcn_emb_path else gcn_emb_path
+        
+        if emb_path and os.path.exists(emb_path):
+            model_rec.load_gcn_embeddings(emb_path)
+            logging.info(f"Loaded GCN embeddings from {emb_path}")
+            if lightgcn_emb_path:
+                logging.info(f"  (using LightGCN embeddings)")
         else:
-            logging.warning(f"GCN embedding file not found: {gcn_emb_path}")
+            logging.warning(f"GCN embedding file not found: {emb_path}")
 
     generate_with_grad = undecorated(model_rec.generate)
     model_rec.generate_with_grad = MethodType(generate_with_grad, model_rec)
