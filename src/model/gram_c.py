@@ -385,6 +385,8 @@ class EncoderWrapperC(EncoderWrapper):
             # gcn_embs: [Batch, K, GCN_Dim]
             # CollaborativeAdapter 支持 3D 输入，对最后一维进行变换
             prefix_emb = self.collaborative_adapter(gcn_embs)
+            token_mask = (recent_item_ids != 0).float().unsqueeze(-1).to(device)
+            prefix_emb = prefix_emb * token_mask
             # prefix_emb: [Batch, K, LLM_Dim]
             
             # 整段 Prefix Dropout（K 个 tokens 一起置零）
@@ -403,6 +405,8 @@ class EncoderWrapperC(EncoderWrapper):
             
             # 通过 Adapter 映射到 LLM 空间: [Batch, LLM_Dim]
             prefix_emb = self.collaborative_adapter(pooled_emb)
+            has_valid = (recent_item_ids != 0).any(dim=1, keepdim=True).float().to(device)
+            prefix_emb = prefix_emb * has_valid
             
             # Prefix Dropout (仅在训练时)
             if self.training and self.prefix_dropout_prob > 0:
@@ -470,11 +474,15 @@ class EncoderWrapperC(EncoderWrapper):
                 [prefix_emb_expanded, inputs_embeds_reshaped], dim=1
             )  # [B*N, P+L, D]
 
-            prefix_mask = torch.ones(
-                (bsz * self.n_passages, prefix_length),
-                dtype=attention_mask_reshaped.dtype,
-                device=device,
-            )
+            if self.use_sequential_prefix:
+                prefix_mask = (self._recent_item_ids != 0).to(
+                    dtype=attention_mask_reshaped.dtype, device=device
+                )
+            else:
+                prefix_mask = (self._recent_item_ids != 0).any(dim=1, keepdim=True).to(
+                    dtype=attention_mask_reshaped.dtype, device=device
+                )
+            prefix_mask = prefix_mask.repeat_interleave(self.n_passages, dim=0)
             attention_mask_with_prefix = torch.cat(
                 [prefix_mask, attention_mask_reshaped], dim=1
             )  # [B*N, P+L]
